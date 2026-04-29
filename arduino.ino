@@ -14,8 +14,8 @@ const byte DNS_PORT = 53;
 const int WEB_PORT = 80;  // Standardport för webbplatser
 const char* FIRMWARE_URL = "http://192.168.4.50:3000/firmware.bin";
 
-const int safetyUDistance = 15;
-const int safetyLDistance = 100;
+const int safetyUDistance = 10;
+const int safetyLDistance = 60;
 
 WebServer webServer(WEB_PORT);  // NYTT: Starta webbservern
 
@@ -33,14 +33,15 @@ UltraSonicDistanceSensor distanceSensor5(16, 33);  // Initialize sensor that use
 #define RIGHT_FWD 18
 #define RIGHT_BWD 19
 
-int velocity = 500;
+int velocity = 90;
+int turnVelocity = 550;
 
 unsigned long autoStopTime = 0;
 bool isAutoMode = false;
 bool turnRightNext = true;  // Minnet för gräsklipparen (Scenario B)
 
 // Kalibreringsvärden (Justera dessa efter din robot)
-const int TIME_FOR_90_DEG = 2300;
+const int TIME_FOR_90_DEG = 400;
 const int TIME_FOR_FORWARD_STEP = 600;
 
 // ==========================================
@@ -58,10 +59,14 @@ const unsigned long SENSOR_READ_INTERVAL_MS = 50;
 
 VL53L0X sensors[SENSOR_COUNT];
 bool sensorInitialized[SENSOR_COUNT] = { false, false, false, false };
-int lastDistanceMm[SENSOR_COUNT] = { -1, -1, -1, -1 };
+int lastDistanceMm[SENSOR_COUNT] = { 999, 999, 999, 999 };
 int lastUDistance[5] = { -1, -1, -1, -1, -1 };
 unsigned long lastUReadMs = 0;
 unsigned long lastSensorReadMs = 0;
+
+const int LASER_OUT_OF_RANGE_VALUE = 999;
+const unsigned long LASER_999_RESTART_MS = 1000;
+unsigned long laserOutOfRangeSince[SENSOR_COUNT] = {0, 0, 0, 0};
 
 enum MotionState {
   MOTION_STOPPED,
@@ -75,6 +80,13 @@ MotionState currentMotion = MOTION_STOPPED;
 // ==========================================
 // MOTORFUNKTIONER
 // ==========================================
+
+void performOTA() {
+  Serial.println("Startar nedladdning av firmware...");
+  WiFiClient otaClient;
+  t_httpUpdate_return ret = httpUpdate.update(otaClient, FIRMWARE_URL);
+  if (ret == HTTP_UPDATE_OK) Serial.println("Uppdatering klar! Startar om...");
+}
 
 void updateUltrasonicSensors() {
   unsigned long now = millis();
@@ -90,8 +102,8 @@ void updateUltrasonicSensors() {
 boolean checkForwardSafety() {
   int us2 = lastUDistance[1];
   int us3 = lastUDistance[2];
-  int l0 = lastDistanceMm[0];
-  int l1 = lastDistanceMm[1];
+  int l0 = lastDistanceMm[2];
+  int l1 = lastDistanceMm[3];
   if ((us2 > 0 && us2 < safetyUDistance) || (us3 > 0 && us3 < safetyUDistance) || l0 > safetyLDistance || l1 > safetyLDistance) {
     return false;
   }
@@ -100,8 +112,8 @@ boolean checkForwardSafety() {
 
 boolean checkBackwardsSafety() {
   int us1 = lastUDistance[0];
-  int l2 = lastDistanceMm[2];
-  int l3 = lastDistanceMm[3];
+  int l2 = lastDistanceMm[0];
+  int l3 = lastDistanceMm[1];
   if ((us1 > 0 && us1 < safetyUDistance) || l2 > safetyLDistance || l3 > safetyLDistance) {
     return false;
   }
@@ -132,8 +144,26 @@ boolean checkLeftSafety() {
   }
 }
 
+const int KICKSTART_VELOCITY = 600; 
+const int KICKSTART_TIME_MS = 40; // 40-50 millisekunder brukar räcka för att "knycka" igång hjulen
+
 void moveForward() {
   if (checkForwardSafety()) {
+    
+    // NYTT: KICKSTART! Körs bara om vi precis stod stilla (eller backade)
+    if (currentMotion != MOTION_FORWARD) {
+      // Om vår valda hastighet redan är hög, behöver vi inte kickstarta
+      int startSpd = (velocity < KICKSTART_VELOCITY) ? KICKSTART_VELOCITY : velocity;
+      
+      analogWrite(LEFT_FWD, 0);
+      analogWrite(LEFT_BWD, startSpd);
+      analogWrite(RIGHT_FWD, startSpd);
+      analogWrite(RIGHT_BWD, 0);
+      
+      delay(KICKSTART_TIME_MS); // Ge kicken en bråkdel av en sekund att verka
+    }
+
+    // Fortsätt sedan med den angivna lägre hastigheten
     analogWrite(LEFT_FWD, 0);
     analogWrite(LEFT_BWD, velocity);
     analogWrite(RIGHT_FWD, velocity);
@@ -141,8 +171,23 @@ void moveForward() {
     currentMotion = MOTION_FORWARD;
   }
 }
+
 void moveBackward() {
   if (checkBackwardsSafety()) {
+    
+    // NYTT: KICKSTART för backen
+    if (currentMotion != MOTION_BACKWARD) {
+      int startSpd = (velocity < KICKSTART_VELOCITY) ? KICKSTART_VELOCITY : velocity;
+      
+      analogWrite(LEFT_FWD, startSpd);
+      analogWrite(LEFT_BWD, 0);
+      analogWrite(RIGHT_FWD, 0);
+      analogWrite(RIGHT_BWD, startSpd);
+      
+      delay(KICKSTART_TIME_MS);
+    }
+
+    // Fortsätt backa med den angivna lägre hastigheten
     analogWrite(LEFT_FWD, velocity);
     analogWrite(LEFT_BWD, 0);
     analogWrite(RIGHT_FWD, 0);
@@ -153,17 +198,18 @@ void moveBackward() {
 void turnLeft() {
   if (checkLeftSafety()) {
     analogWrite(LEFT_FWD, 0);
-    analogWrite(LEFT_BWD, velocity);
+    analogWrite(LEFT_BWD, turnVelocity);
     analogWrite(RIGHT_FWD, 0);
-    analogWrite(RIGHT_BWD, velocity);
+    analogWrite(RIGHT_BWD, turnVelocity);
     currentMotion = MOTION_LEFT;
   }
 }
+
 void turnRight() {
   if (checkRightSafety()) {
-    analogWrite(LEFT_FWD, velocity);
+    analogWrite(LEFT_FWD, turnVelocity);
     analogWrite(LEFT_BWD, 0);
-    analogWrite(RIGHT_FWD, velocity);
+    analogWrite(RIGHT_FWD, turnVelocity);
     analogWrite(RIGHT_BWD, 0);
     currentMotion = MOTION_RIGHT;
   }
@@ -174,6 +220,7 @@ void stopAll() {
   analogWrite(RIGHT_FWD, 0);
   analogWrite(RIGHT_BWD, 0);
   currentMotion = MOTION_STOPPED;
+  velocity = 90;
 }
 
 // ==========================================
@@ -263,7 +310,7 @@ const char* htmlPage = R"rawliteral(
     </div>
     <div class="speed-panel">
       <label>Hastighet (0-1023):</label>
-      <input type="number" id="spd" value="550" min="0" max="1023">
+      <input type="number" id="spd" value="90" min="0" max="1023">
     </div>
     <button class="back-btn" onclick="showPage('menuPage')">Tillbaka</button>
   </div>
@@ -316,6 +363,175 @@ const char* htmlPage = R"rawliteral(
 </html>
 )rawliteral";
 
+String scanI2CJson() {
+  String json = "[";
+
+  bool first = true;
+
+  for (byte address = 1; address < 127; address++) {
+    Wire.beginTransmission(address);
+    byte error = Wire.endTransmission();
+
+    if (error == 0) {
+      if (!first) json += ",";
+      json += "\"0x";
+      if (address < 16) json += "0";
+      json += String(address, HEX);
+      json += "\"";
+      first = false;
+    }
+  }
+
+  json += "]";
+  return json;
+}
+
+void restartLasers() {
+  Serial.println("VAKTHUND: Lasrar har hängt sig! Startar om...");
+
+  stopAll();
+
+  // Markera alla som offline direkt
+  for (uint8_t i = 0; i < SENSOR_COUNT; i++) {
+    sensorInitialized[i] = false;
+    lastDistanceMm[i] = 999;
+  }
+
+  // Stäng av alla VL53L0X via XSHUT
+  for (uint8_t i = 0; i < SENSOR_COUNT; i++) {
+    pinMode(XSHUT_PINS[i], OUTPUT);
+    digitalWrite(XSHUT_PINS[i], LOW);
+  }
+
+  delay(100);
+
+  // Starta om I2C-bussen
+  Wire.end();
+  delay(50);
+  Wire.begin();
+  Wire.setTimeOut(100);
+
+  delay(50);
+
+  // Starta sensorerna en i taget
+  for (uint8_t i = 0; i < SENSOR_COUNT; i++) {
+    Serial.printf("VAKTHUND: Startar sensor %u på XSHUT %d...\n", i, XSHUT_PINS[i]);
+
+    digitalWrite(XSHUT_PINS[i], HIGH);
+    delay(100);
+
+    sensors[i].setTimeout(500);
+
+    if (!sensors[i].init()) {
+      Serial.printf("VAKTHUND: Sensor %u kunde INTE initieras\n", i);
+      digitalWrite(XSHUT_PINS[i], LOW);
+      sensorInitialized[i] = false;
+      lastDistanceMm[i] = 999;
+      continue;
+    }
+
+    delay(20);
+
+    sensors[i].setAddress(NEW_ADDRESSES[i]);
+    delay(20);
+
+    sensors[i].startContinuous(50);
+    delay(50);
+
+    uint16_t testRead = sensors[i].readRangeContinuousMillimeters();
+
+    if (sensors[i].timeoutOccurred()) {
+      Serial.printf("VAKTHUND: Sensor %u initierad men timeout vid testläsning\n", i);
+      sensorInitialized[i] = false;
+      lastDistanceMm[i] = 999;
+      digitalWrite(XSHUT_PINS[i], LOW);
+      continue;
+    }
+
+    if (testRead > 8000) {
+      // Out of range är inte nödvändigtvis fel.
+      // Sätt ett kantvärde så säkerhetslogiken kan reagera.
+      lastDistanceMm[i] = 999;
+    } else {
+      int correctedDistance = (int)testRead - DISTANCE_OFFSET_MM;
+      if (correctedDistance < 0) correctedDistance = 0;
+      lastDistanceMm[i] = correctedDistance;
+    }
+
+    sensorInitialized[i] = true;
+
+    Serial.printf(
+      "VAKTHUND: Sensor %u OK, adress 0x%02X, test=%u, sparat=%d\n",
+      i,
+      NEW_ADDRESSES[i],
+      testRead,
+      lastDistanceMm[i]);
+  }
+
+  Serial.println("VAKTHUND: Lasrar omstart klara.");
+}
+
+void restartOneLaser(uint8_t i) {
+  Serial.printf("VAKTHUND: Startar om laser %u...\n", i);
+
+  sensorInitialized[i] = false;
+  lastDistanceMm[i] = 999;
+
+  // Stäng av strömmen
+  digitalWrite(XSHUT_PINS[i], LOW);
+  delay(100);
+
+  // Sätt på strömmen igen (Nu är sensorn 0x29)
+  digitalWrite(XSHUT_PINS[i], HIGH);
+  delay(100);
+
+  // ==========================================
+  // NYTT: NOLLSTÄLL MJUKVARU-OBJEKTET!
+  // ==========================================
+  sensors[i] = VL53L0X(); 
+  
+  sensors[i].setTimeout(500);
+
+  // Nu letar ESP32:an på 0x29 och hittar sensorn!
+  if (!sensors[i].init()) {
+    Serial.printf("VAKTHUND: Laser %u kunde inte initieras\n", i);
+    digitalWrite(XSHUT_PINS[i], LOW);
+    sensorInitialized[i] = false;
+    lastDistanceMm[i] = 999;
+    return;
+  }
+
+  delay(20);
+
+  // Sätt den riktiga adressen (t.ex. 0x30)
+  sensors[i].setAddress(NEW_ADDRESSES[i]);
+  delay(20);
+
+  sensors[i].startContinuous(50);
+  delay(50);
+
+  uint16_t testRead = sensors[i].readRangeContinuousMillimeters();
+
+  if (sensors[i].timeoutOccurred()) {
+    Serial.printf("VAKTHUND: Laser %u timeout efter restart\n", i);
+    sensorInitialized[i] = false;
+    lastDistanceMm[i] = 999;
+    return;
+  }
+
+  if (testRead > 8000) {
+    lastDistanceMm[i] = LASER_OUT_OF_RANGE_VALUE;
+  } else {
+    int correctedDistance = (int)testRead - DISTANCE_OFFSET_MM;
+    if (correctedDistance < 0) correctedDistance = 0;
+    lastDistanceMm[i] = correctedDistance;
+  }
+
+  sensorInitialized[i] = true;
+
+  Serial.printf("VAKTHUND: Laser %u restart OK, värde=%d\n", i, lastDistanceMm[i]);
+}
+
 void setupWebEndpoints() {
   // Huvudsidan
   webServer.on("/", []() {
@@ -354,13 +570,50 @@ void setupWebEndpoints() {
     webServer.send(200, "application/json", json);
   });
 
-  webServer.on("/checkLDistances", []() {
+  webServer.on("/laserStatus", []() {
     String json = "{";
+
     json += "\"laser0\":" + String(lastDistanceMm[0]) + ",";
     json += "\"laser1\":" + String(lastDistanceMm[1]) + ",";
     json += "\"laser2\":" + String(lastDistanceMm[2]) + ",";
-    json += "\"laser3\":" + String(lastDistanceMm[3]);
+    json += "\"laser3\":" + String(lastDistanceMm[3]) + ",";
+
+    json += "\"init0\":" + String(sensorInitialized[0] ? "true" : "false") + ",";
+    json += "\"init1\":" + String(sensorInitialized[1] ? "true" : "false") + ",";
+    json += "\"init2\":" + String(sensorInitialized[2] ? "true" : "false") + ",";
+    json += "\"init3\":" + String(sensorInitialized[3] ? "true" : "false") + ",";
+
+    json += "\"i2c\":" + scanI2CJson();
+
     json += "}";
+
+    webServer.send(200, "application/json", json);
+  });
+
+  webServer.on("/velocity", []() {
+    String json = "{";
+    json += "\"velocity\":" + String(velocity);
+    json += "}";
+    
+    webServer.send(200, "application/json", json);
+  });
+
+  webServer.on("/i2cscan", []() {
+    String json = "{";
+    json += "\"devices\":" + scanI2CJson();
+    json += "}";
+
+    webServer.send(200, "application/json", json);
+  });
+
+  webServer.on("/restartLasers", []() {
+    restartLasers();
+
+    String json = "{";
+    json += "\"message\":\"restartLasers done\",";
+    json += "\"devices\":" + scanI2CJson();
+    json += "}";
+
     webServer.send(200, "application/json", json);
   });
 
@@ -454,26 +707,68 @@ void updateSensors() {
   lastSensorReadMs = now;
 
   for (uint8_t i = 0; i < SENSOR_COUNT; i++) {
-    if (!sensorInitialized[i]) continue;
+    
+    // FELSÄKERT LÄGE: Om sensorn inte är initierad (t.ex. under en omstart),
+    // rapportera 999 för att tvinga fram ett stopp!
+    if (!sensorInitialized[i]) {
+      lastDistanceMm[i] = LASER_OUT_OF_RANGE_VALUE;
+      continue;
+    }
 
     uint16_t rawDistance = sensors[i].readRangeContinuousMillimeters();
-    if (sensors[i].timeoutOccurred()) continue;
+
+    // 1. Riktigt sensorfel: Timeout / Hängning
+    if (sensors[i].timeoutOccurred()) {
+      Serial.printf("VAKTHUND: Laser %u timeout upptäckt! Startar om DIREKT.\n", i);
+      
+      // Sätt den till 999 DIREKT så att säkerhetsspärren slår till denna loop-runda
+      lastDistanceMm[i] = LASER_OUT_OF_RANGE_VALUE; 
+      
+      // Försök starta om bara den här sensorn direkt
+      restartOneLaser(i);
+      
+      continue; // Avbryt vidare mätning för denna sensor i denna runda
+    }
+
+    // 2. Out-of-range / kant / golv. (Ingen fara för sensorns hälsa)
+    if (rawDistance > 8000) {
+      lastDistanceMm[i] = LASER_OUT_OF_RANGE_VALUE;
+
+      if (laserOutOfRangeSince[i] == 0) {
+        laserOutOfRangeSince[i] = now;
+      }
+
+      // Om den fastnar på 999 i en hel sekund, då är det förmodligen fel
+      if (now - laserOutOfRangeSince[i] > LASER_999_RESTART_MS) {
+        Serial.printf("VAKTHUND: Laser %u har varit 999 för länge. Startar om...\n", i);
+        restartOneLaser(i);
+        laserOutOfRangeSince[i] = 0;
+      }
+
+      continue;
+    }
+
+    // 3. Normal giltig mätning
+    laserOutOfRangeSince[i] = 0; // Nollställ varningen
 
     int correctedDistance = (int)rawDistance - DISTANCE_OFFSET_MM;
     if (correctedDistance < 0) correctedDistance = 0;
 
-    if (lastDistanceMm[i] >= 0) {
+    if (lastDistanceMm[i] >= 0 && lastDistanceMm[i] != LASER_OUT_OF_RANGE_VALUE) {
       int delta = correctedDistance - lastDistanceMm[i];
+
+      // Kantdetektion för din dammsugar-bounce
       if (delta >= EDGE_JUMP_THRESHOLD_MM && correctedDistance >= EDGE_MIN_DISTANCE_MM) {
-        if (i <= FRONT_SENSOR_END) onFrontTableEdgeDetected(i, correctedDistance, delta);
-        else onRearTableEdgeDetected(i, correctedDistance, delta);
+        if (i <= FRONT_SENSOR_END) {
+          onFrontTableEdgeDetected(i, correctedDistance, delta);
+        } else {
+          onRearTableEdgeDetected(i, correctedDistance, delta);
+        }
       }
     }
-    //Serial.printf("Sensor %u: %d\n", i, correctedDistance);
+
     lastDistanceMm[i] = correctedDistance;
   }
-  /*Serial.println("");
-  Serial.println("");*/
 }
 
 void checkSafety() {
@@ -485,7 +780,7 @@ void checkSafety() {
           delay(10);
           analogWrite(LEFT_FWD, velocity);
           analogWrite(RIGHT_BWD, velocity);
-          delay(200);
+          delay(180);
           stopAll();
         }
         break;
@@ -498,7 +793,7 @@ void checkSafety() {
           // Gasa FRAMÅT för att bromsa farten bakåt:
           analogWrite(LEFT_BWD, velocity);
           analogWrite(RIGHT_FWD, velocity);
-          delay(200);
+          delay(180);
           stopAll();
         }
         break;
@@ -536,12 +831,7 @@ void checkSafety() {
 // ==========================================
 // OTA & NÄTVERKSHANTERING
 // ==========================================
-void performOTA() {
-  Serial.println("Startar nedladdning av firmware...");
-  WiFiClient otaClient;
-  t_httpUpdate_return ret = httpUpdate.update(otaClient, FIRMWARE_URL);
-  if (ret == HTTP_UPDATE_OK) Serial.println("Uppdatering klar! Startar om...");
-}
+
 
 // ==========================================
 // SETUP & MAIN LOOP
@@ -564,6 +854,7 @@ void setup() {
 
   // --- STARTA RESTEN AV SYSTEMET ---
   setupWebEndpoints();  // HTTP-server (för webbläsaren)
+  webServer.begin();
   Serial.println("Initierar sensorer...");
   setupSensors();  // VL53L0X
 
@@ -605,57 +896,57 @@ void performAutoBounce() {
   delay(200);
   stopAll();
 
-  // Steg 2: Backa för svängradie
+  // Steg 2: Backa från ursprungskanten
   moveBackward();
   delay(300);
   stopAll();
   delay(100);
 
-  // Steg 3: Välj håll baserat på minnet (turnRightNext)
-  if (turnRightNext) {
-    turnRight();
-    delay(TIME_FOR_90_DEG);
-    stopAll();
-    delay(100);
+  // Steg 3: Första högersvängen
+  turnRight();
+  delay(TIME_FOR_90_DEG);
+  stopAll();
+  delay(100);
 
-    // Steg 4: Det säkra sidosteget
-    if (safeStepForward(TIME_FOR_FORWARD_STEP) == true) {
-      // Steg 5: Sidosteget lyckades, fullfölj U-svängen!
-      turnRight();
-      delay(TIME_FOR_90_DEG);
-      stopAll();
-      delay(100);
-      turnRightNext = false;  // Invertera minnet till nästa gång
-    } else {
-      // SCENARIO C: Hörnfällan! (Sidosteget hittade en ny kant)
-      // Gör en Flipper-studs (slumpmässig jättesväng) för att fly
-      turnLeft();
-      delay(random(700, 1100));
-      stopAll();
-      delay(100);
+  // Steg 4: Det "Smarta" sidosteget
+  moveForward();
+  unsigned long start = millis();
+  bool hitEdgeDuringStep = false; // Minne för att veta om vi avbröt i förtid
+
+  // Kör framåt max TIME_FOR_FORWARD_STEP millisekunder
+  while (millis() - start < TIME_FOR_FORWARD_STEP) {
+    updateSensors();
+    updateUltrasonicSensors();
+    
+    // Om vi hittar en kant/hinder under sidosteget
+    if (!checkForwardSafety()) {
+      hitEdgeDuringStep = true;
+      break; // AVBRYT "delayen" direkt!
     }
-
-  } else {
-    // Samma logik för Vänster-svängen
-    turnLeft();
-    delay(TIME_FOR_90_DEG);
-    stopAll();
-    delay(100);
-
-    if (safeStepForward(TIME_FOR_FORWARD_STEP) == true) {
-      turnLeft();
-      delay(TIME_FOR_90_DEG);
-      stopAll();
-      delay(100);
-      turnRightNext = true;
-    } else {
-      // SCENARIO C: Hörnfällan!
-      turnRight();
-      delay(random(700, 1100));
-      stopAll();
-      delay(100);
-    }
+    delay(10); // Liten paus för stabilitet
   }
+
+  stopAll();
+  delay(100);
+
+  // Om sidosteget avbröts av en ny kant (vi är i ett hörn)
+  // Backa lite så att roboten får plats att göra sin sista sväng!
+  if (hitEdgeDuringStep) {
+    Serial.println("Kant hittad under sidosteg! Backar för att få svängrum.");
+    moveBackward();
+    delay(250); // Justera denna tid om den behöver backa mer/mindre
+    stopAll();
+    delay(100);
+  }
+
+  // Steg 5: Andra högersvängen (fullbordar U-svängen)
+  turnRight();
+  delay(TIME_FOR_90_DEG);
+  stopAll();
+  delay(100);
+
+  // KLART! Nu pekar roboten tillbaka in mot bordet och main loop() tar över 
+  // och kör moveForward().
 }
 
 
