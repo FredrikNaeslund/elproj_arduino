@@ -1013,7 +1013,7 @@ void setup() {
   pinMode(RIGHT_FWD, OUTPUT);
   pinMode(RIGHT_BWD, OUTPUT);
   WiFi.mode(WIFI_AP);
-  WiFi.softAP("Halabi", "josef123");
+  WiFi.softAP("YOUR_SSID", "YOUR_PASSWORD");
   Serial.print("AP-IP: ");
   Serial.println(WiFi.softAPIP());
 
