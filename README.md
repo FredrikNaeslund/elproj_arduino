@@ -68,14 +68,14 @@ Mätintervall: minst 100 ms mellan läsningar.
 
 Roboten startar som en **WiFi Access Point**.
 
-| Parameter  | Värde           |
-|-----------|-----------------|
-| SSID       | `Halabi`        |
-| Lösenord   | `josef123`      |
-| IP-adress  | `192.168.4.1`   |
-| Port       | 80              |
+| Parameter  | Värde               |
+|-----------|----------------------|
+| SSID       | `<DITT_WIFI_NAMN>`  |
+| Lösenord   | `<DITT_LÖSENORD>`   |
+| IP-adress  |   `192.168.4.1`     |
+| Port       |         80          |
 
-Anslut till WiFi-nätverket "Halabi" och öppna `http://192.168.4.1` i en webbläsare.
+Anslut till WiFi-nätverket "<DITT_WIFI_NAMN>" och öppna `http://192.168.4.1` i en webbläsare.
 
 ---
 
